@@ -5,17 +5,14 @@ from pathlib import Path
 from urllib.parse import urljoin
 from PIL import Image
 from io import BytesIO
-from tqdm import tqdm  # Importation de tqdm pour la barre de chargement
+from tqdm import tqdm
+import traceback
 
-# Chemins
 BASE_INPUT = Path("adidas_data")
 BASE_OUTPUT = Path("adidas_products")
 IMAGES_DIR = BASE_OUTPUT / "images"
-
-# Création des dossiers nécessaires
 IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
-# Headers pour requête vers l'API produit
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -32,18 +29,18 @@ HEADERS = {
 }
 
 BASE_API_URL = "https://www.adidas.fr/plp-app/api/product/"
-
 CATEGORY_TRANSLATIONS = {
     "vetements": "clothing",
     "chaussures": "shoes",
     "accessoires": "accessories"
 }
-
 CURRENCY_BY_COUNTRY = {
     "fr": "EUR",
     "us": "USD",
     "uk": "GBP"
 }
+
+country_seen_ids = {}  # <- Pour suivre les ID déjà vus par pays
 
 def sanitize_filename(name):
     return name.replace("/", "_").replace("\\", "_").replace("?", "_").replace("&", "_")
@@ -60,33 +57,50 @@ def download_image(url, local_path):
             print(f"❌ Erreur image {url}: {response.status_code}")
     except Exception as e:
         print(f"❌ Exception image {url}: {e}")
+        traceback.print_exc()
 
 def process_product(code, country, gender, category):
-    json_output_path = BASE_OUTPUT / country / gender / f"{code}.json"
+    if not code:
+        print("⚠️ Code vide ignoré")
+        return
 
     url = BASE_API_URL + code
     print(f"🔎 Traitement du produit : {code} ({country}/{gender}/{category})")
+
     try:
         response = requests.get(url, headers=HEADERS, timeout=10)
         if response.status_code != 200:
             print(f"❌ Requête échouée pour {code} : {response.status_code}")
+            with open("rejected_codes.txt", "a", encoding="utf-8") as log:
+                log.write(f"{code} ({country}/{gender}/{category}) - HTTP {response.status_code}\n")
             return
 
         data = response.json()
         product = data.get("product", {})
-
         product_id = product.get("id")
+
+        if not product_id:
+            print(f"⚠️ Pas d'ID produit retourné pour {code}")
+            with open("rejected_codes.txt", "a", encoding="utf-8") as log:
+                log.write(f"{code} ({country}/{gender}/{category}) - Pas d'ID produit\n")
+            return
+
+        # Vérification de doublon dans le pays
+        seen_ids = country_seen_ids.setdefault(country, set())
+        if product_id in seen_ids:
+            print(f"⚠️ Doublon ignoré dans {country} : {product_id}")
+            return
+        seen_ids.add(product_id)
+
         name = product.get("title")
         url_suffix = product.get("url")
-        full_url = f"https://www.adidas.{country}/{url_suffix.lstrip('/')}"
+        full_url = f"https://www.adidas.{country}/{url_suffix.lstrip('/')}" if url_suffix else ""
         image_main = product.get("image")
         image_hover = product.get("hoverImage")
-
         price_data = product.get("priceData", {})
         current_price = price_data.get("salePrice", price_data.get("price"))
         original_price = price_data.get("price")
         is_discount = current_price != original_price
-
         translated_category = CATEGORY_TRANSLATIONS.get(category, category)
         currency = CURRENCY_BY_COUNTRY.get(country, "EUR")
 
@@ -130,13 +144,16 @@ def process_product(code, country, gender, category):
                 "local_path": str(local_hover).replace("\\", "/")
             })
 
+        json_output_path = BASE_OUTPUT / country / gender / f"{code}.json"
         json_output_path.parent.mkdir(parents=True, exist_ok=True)
+
         with open(json_output_path, "w", encoding="utf-8") as f:
             json.dump(output, f, indent=4, ensure_ascii=False)
         print(f"✅ Données sauvegardées : {json_output_path}")
 
     except Exception as e:
         print(f"❌ Exception pour {code} : {e}")
+        traceback.print_exc()
 
 def run_all(test_mode=False):
     for country_dir in BASE_INPUT.iterdir():
@@ -155,14 +172,21 @@ def run_all(test_mode=False):
                 with open(file, "r", encoding="utf-8") as f:
                     codes = [line.strip() for line in f if line.strip()]
 
-                # Ajout de la barre de chargement avec tqdm
-                total_codes = len(codes)
+                total = len(codes)
+                ok = 0
                 if test_mode:
-                    codes = codes[:100]  # Limite à 100 produits pour le test
+                    codes = codes[:100]
 
                 print(f"📊 Traitement des produits {category} ({len(codes)} codes)")
                 for code in tqdm(codes, desc=f"{country} / {gender} / {category}", ncols=100):
-                    process_product(code, country, gender, category)
+                    try:
+                        process_product(code, country, gender, category)
+                        ok += 1
+                    except Exception as e:
+                        print(f"❌ Erreur sur {code} : {e}")
+                        traceback.print_exc()
+
+                print(f"✅ Fini {country}/{gender}/{category} : {ok}/{total} produits traités")
 
 if __name__ == "__main__":
-    run_all(test_mode=False)  # Passer test_mode=True pour tester sur 100 produits
+    run_all(test_mode=False)

@@ -21,48 +21,58 @@ HEADERS = {
 
 URL_MAP = {
     "fr": {
-        "hommes": {
-            "chaussures": "https://www.adidas.fr/chaussures-hommes",
-            "vetements": "https://www.adidas.fr/vetements-hommes",
-            "accessoires": "https://www.adidas.fr/accessoires-hommes",
+        "mens": {
+            "shoes": "https://www.adidas.fr/chaussures-hommes",
+            "clothes": "https://www.adidas.fr/vetements-hommes",
+            "accessories": "https://www.adidas.fr/accessoires-hommes",
         },
-        "femmes": {
-            "chaussures": "https://www.adidas.fr/chaussures-femmes",
-            "vetements": "https://www.adidas.fr/vetements-femmes",
-            "accessoires": "https://www.adidas.fr/accessoires-femmes",
+        "womens": {
+            "shoes": "https://www.adidas.fr/chaussures-femmes",
+            "clothes": "https://www.adidas.fr/vetements-femmes",
+            "accessories": "https://www.adidas.fr/accessoires-femmes",
         }
     },
     "us": {
-        "hommes": {
-            "chaussures": "https://www.adidas.com/us/shoes-men",
-            "vetements": "https://www.adidas.com/us/clothing-men",
-            "accessoires": "https://www.adidas.com/us/accessories-men",
+        "mens": {
+            "shoes": "https://www.adidas.com/us/shoes-men",
+            "clothes": "https://www.adidas.com/us/clothing-men",
+            "accessories": "https://www.adidas.com/us/accessories-men",
         },
-        "femmes": {
-            "chaussures": "https://www.adidas.com/us/shoes-women",
-            "vetements": "https://www.adidas.com/us/clothing-women",
-            "accessoires": "https://www.adidas.com/us/accessories-women",
+        "womens": {
+            "shoes": "https://www.adidas.com/us/shoes-women",
+            "clothes": "https://www.adidas.com/us/clothing-women",
+            "accessories": "https://www.adidas.com/us/accessories-women",
         }
     },
     "uk": {
-        "hommes": {
-            "chaussures": "https://www.adidas.co.uk/shoes-men",
-            "vetements": "https://www.adidas.co.uk/clothing-men",
-            "accessoires": "https://www.adidas.co.uk/accessories-men",
+        "mens": {
+            "shoes": "https://www.adidas.co.uk/shoes-men",
+            "clothes": "https://www.adidas.co.uk/clothing-men",
+            "accessories": "https://www.adidas.co.uk/accessories-men",
         },
-        "femmes": {
-            "chaussures": "https://www.adidas.co.uk/shoes-women",
-            "vetements": "https://www.adidas.co.uk/clothing-women",
-            "accessoires": "https://www.adidas.co.uk/accessories-women",
+        "womens": {
+            "shoes": "https://www.adidas.co.uk/shoes-women",
+            "clothes": "https://www.adidas.co.uk/clothing-women",
+            "accessories": "https://www.adidas.co.uk/accessories-women",
         }
     },
 }
 
-def get_soup(url):
-    print(f"📥 Requête vers {url}")
-    response = requests.get(url, headers=HEADERS, timeout=10)
-    response.encoding = 'utf-8'
-    return BeautifulSoup(response.text, "html.parser")
+def get_soup(url, retries=3, timeout=10, backoff=2):
+    for attempt in range(1, retries + 1):
+        try:
+            print(f"📥 Requête vers {url} (tentative {attempt}/{retries})")
+            response = requests.get(url, headers=HEADERS, timeout=timeout)
+            response.encoding = 'utf-8'
+            return BeautifulSoup(response.text, "html.parser")
+        except requests.exceptions.ReadTimeout:
+            print(f"⏳ Timeout sur {url}, tentative {attempt}/{retries}...")
+        except requests.exceptions.ConnectionError as e:
+            print(f"⚠️ Erreur connexion sur {url} : {e}, tentative {attempt}/{retries}...")
+        if attempt < retries:
+            time.sleep(backoff * attempt)
+    print(f"❌ Échec après {retries} tentatives pour {url}")
+    return None
 
 def get_max_pages(soup):
     page_indicator = soup.find("div", {"class": "pagination_progress-bar__sWWOn"})
@@ -90,38 +100,40 @@ def save_links_codes(links, output_path):
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     codes = [link.replace('.', '/').split('/')[-2] for link in links]
 
-    # lire les existants
-    existing_links = set()
-    if os.path.exists(output_path + "_links.txt"):
-        with open(output_path + "_links.txt", "r", encoding="utf-8") as f:
-            existing_links.update(line.strip() for line in f)
-
     with open(output_path + "_links.txt", "a", encoding="utf-8") as f_link, \
          open(output_path + "_codes.txt", "a", encoding="utf-8") as f_code:
         for link, code in zip(links, codes):
-            if link not in existing_links:
-                f_link.write(link + "\n")
-                f_code.write(code + "\n")
+            print(f"➕ Ajout : {code}")
+            f_link.write(link + "\n")
+            f_code.write(code + "\n")
 
-    print(f"✅ {len(links)} liens traités pour {output_path}")
+    print(f"📦 {len(links)} liens ajoutés (doublons inclus)")
 
 def scrape_all():
     for country, genders in URL_MAP.items():
         for gender, categories in genders.items():
             for category, base_url in categories.items():
+                print(f"\n🚀 Scraping {country}/{gender}/{category}")
                 soup = get_soup(base_url)
+                if soup is None:
+                    print(f"⛔️ Impossible de récupérer la page {base_url}, passage à la suivante.")
+                    continue
                 max_pages = get_max_pages(soup)
+
                 if not max_pages:
                     print(f"⚠️ Aucune pagination détectée pour {base_url}")
                     continue
 
                 all_links = []
-                for page in range(1, max_pages + 1):
-                    start = (page - 1) * STEP
-                    paged_url = base_url + f"?start={start}" if start else base_url
+                for page in range(max_pages):
+                    start = page * STEP
+                    paged_url = base_url if start == 0 else f"{base_url}?start={start}"
                     soup = get_soup(paged_url)
+                    if soup is None:
+                        print(f"⛔️ Impossible de récupérer la page {paged_url}, passage à la suivante.")
+                        continue
                     page_links = extract_links(soup)
-                    print(f"🔗 {len(page_links)} liens trouvés page {page}/{max_pages} [{country}/{gender}/{category}]")
+                    print(f"🔗 {len(page_links)} liens trouvés page {page + 1}/{max_pages}")
                     all_links.extend(page_links)
                     time.sleep(1)
 
